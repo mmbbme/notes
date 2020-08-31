@@ -101,15 +101,9 @@ CloseHandle(pi.hThread);
 ```
 ### 句柄表
 
-> 句柄相当于内核对象地址
+> 在每个进程中都存在一个句柄表，列出了所有本进程打开的创建的所有内核对象，它是私有且独立的
 
-大概是这样子
-
-| 索引 | 内核对象地址 | 引用计数 |
-| ---- | ------------ | -------- |
-|      |              |          |
-
-
+句柄在32位系统时就是一个32位的结构，64位毅然.每一个句柄包含了指向对象的指针、掩码、继承标识等。
 
 > 像进程线程文件互斥体事件等在内核都有一个对应的结构体对象，这些结构体负责管理。这就是内核对象
 
@@ -125,7 +119,7 @@ CloseHandle(pi.hThread);
 
 举个典型的例子:
 
-OpenProcess就能在一个进程中打开另一个进程，并访问另一个句柄表。注意句柄表是一个私有的，像前面的操作并不会对他们的句柄表产生必然联系，它们的句柄表指向的共用对象的句柄不一定会一致。这个共享的内核对象当访问进程增加的时候它自身里面有一个计数器+1，当这个计数器归零的时候它才会销毁，所以CloseHandle<span style="color:red">不一定</span>会让内核对象销毁，他只是让内核对象的引用计数减一。线程对象要把线程关掉，同时关闭句柄引用计数计0它才会销毁。
+OpenProcess就能在一个进程中打开另一个进程，并访问另一个句柄表。注意句柄表是一个私有的，像前面的操作并不会对他们的句柄表产生必然联系，它们的句柄表指向的共用对象的句柄不一定会一致。内核对象会有一个引用计数器，这个共享的内核对象当访问进程增加的时候它自身里面这个计数器+1，当这个计数器归零的时候它才会销毁，所以CloseHandle<span style="color:red">不一定</span>会让内核对象销毁，他只是让内核对象的引用计数减一。线程对象要把线程关掉，同时关闭句柄引用计数计0它才会销毁。
 
 **<span style="color:red;">只要有安全描述符他就是内核对象</span>**
 
@@ -173,23 +167,82 @@ LPCTSTR lpName // 对象名称
 
 ### 进程相关api
 
-CreateProcess创建成功会返回四个数据，进程编号，进程句柄，线程编号，线程句柄。即PROCESS_INFORMATION所存储的东西，句柄是私有的，编号是全局的，
+`全局句柄表 `
 
-这俩个编号其实就是全局句柄表中的索引，就是pid！！
+> 操作系统有一个全局句柄表，它包含了正在运行的线程和进程，跟进程的没有本质区别
+
+`pid`
+
+> `CreateProcess创建成功会返回四个数据，进程编号，进程句柄，线程编号，线程句柄。即PROCESS_INFORMATION所存储的东西，句柄是私有的，编号是全局的，这俩个编号其实就是全局句柄表中的唯一存在索引，就是pid！！
 
 所以在进行TerminateProcess,OpenProcess等等设置到pid的操作的时候，进程句柄没有效果，pid是有效的！
 
-TerminateProcess
+`TerminateProcess`
+
+>  终止|杀死其它进程  
+>
+> 
+>
+> ```c++
+> BOOL TerminateProcess(
+>   HANDLE hProcess,
+>   DWORD uExitCode
+> );
+> ```
+>
+> 参数一：终止的句柄
+>
+> 参数二：终止原因
+>
+> 想要获取终止原因有以下俩个函数
+>
+> 1. 进程
+>
+> ```c++
+> BOOL GetExitCodeProcess(
+>   HANDLE hProcess,
+>   LPDWORD lpExitCode
+> );
+> ```
+>
+> 2. 线程
+>
+> ````c++
+> BOOL GetExitCodeThread(
+>   HANDLE hThread,
+>   LPDWORD lpExitCode
+> );
+> ````
+>
+> 俩个都要有最后那个接收参数获取进程终止状态
+
+`OpenProcess`
+
+> 打开一个存在的进程
+>
+> ```C++
+> HANDLE OpenProcess(
+>   DWORD fdwAccess,
+>   BOOL fInherit,
+>   DWORD IDProcess
+> );
+> ```
+>
+> 参数一：权限标识
+>
+> 参数二：是否允许当前打开的进程可以被继承
+>
+> 参数三：全局句柄引索pid
 
 ````c++
 HANDLE hProcess;
-//hProcess = (HANDLE)0x7D0   无效
+//hProcess = (HANDLE)0x132AD  //直接写句柄  无效
 hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, 0x2AB8);//0x2AB8注意变化
 //终止指定句柄
 TerminateProcess(hProcess, 1);
 ````
 
-CreateProcess
+`CreateProcess`
 
 ````c++
 BOOL CreateProcess(
@@ -203,13 +256,13 @@ BOOL bInheritHandles,//是否允许继承父进程句柄表
  //优先类用来决定此进程的线程调度的优先级。
 DWORD dwCreationFlags,
 LPVOID lpEnvironment,//使用父进程的环境变量
-LPCTSTR lpCurrentDirectory,//指定工作目录
+LPCTSTR lpCurrentDirectory,//指定工作目录,工作目录为空那么跟父进程在一个目录
 LPSTARTUPINFO lpStartupInfo,//指向一个用于决定新进程的主窗体如何显示的STARTUPINFO结构体。
 LPPROCESS_INFORMATION lpProcessInformation //指向一个用来接收新进程的识别信息的PROCESS_INFORMATION结构体。
 );
 ````
 
->  dwCreationFlags设置为挂起创建——**CREATE_SUSPENDED**
+>  dwCreationFlags可以设置为挂起创建——**CREATE_SUSPENDED**
 
 系统不会去启动线程需要开发者手动启动，这中间就可以做一些东西。(滑稽)
 
@@ -1514,7 +1567,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
 
 >  DWORD  ul_reason_for_call
 
- 何时调用
+` 何时调用?`
 
 分为四种情况
 
