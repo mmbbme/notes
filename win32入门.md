@@ -83,8 +83,8 @@ stpi.cb = sizeof(STARTUPINFO);
 TCHAR a[] =_T("notepad");
 
  CreateProcess(
-	NULL,//应用名
-	a,//cmd命令行
+	NULL,//应用名 要有完整路径
+	a,//cmd命令行参数
 	NULL,//使用默认进程安全属性
 	NULL,//使用默认线程安全属性
 	FALSE,//句柄不继承
@@ -99,13 +99,43 @@ system("pause");
 CloseHandle(pi.hProcess);
 CloseHandle(pi.hThread);
 ```
+### 终止进程
+
+关闭指定的进程及其所有线程。
+
+#### 终止当前进程ExitProcess
+
+```c++
+VOID ExitProcess(
+  UINT uExitCode
+);
+```
+
+- uExitCode
+  	[in]指定该进程以及由于此调用而终止的所有线程的退出代码。
+
+  ​	要获取流程的退出值，请使用[GetExitCodeProcess](https://docs.microsoft.com/zh-cn/previous-versions/aa915088(v=msdn.10))函数。
+
+  ​	要检索线程的退出值，请使用[GetExitCodeThread](https://docs.microsoft.com/zh-cn/previous-versions/aa915065(v=msdn.10))函数。
+
+#### 终止另外的进程TerminateProcess
+
+````c++
+BOOL TerminateProcess(
+  HANDLE hProcess,//需要关闭的进程句柄
+  DWORD uExitCode
+);
+````
+
+TerminateProcess对于有带锁的资源的进程不一定会成功，使用时要注意
+
 ### 句柄表
 
 > 在每个进程中都存在一个句柄表，列出了所有本进程打开的创建的所有内核对象，它是私有且独立的
 
 句柄在32位系统时就是一个32位的结构，64位毅然.每一个句柄包含了指向对象的指针、掩码、继承标识等。
 
-> 像进程线程文件互斥体事件等在内核都有一个对应的结构体对象，这些结构体负责管理。这就是内核对象
+> 像进程，线程，文件，互斥体，事件等在内核都有一个对应的结构体对象，这些结构体负责管理。这就是内核对象
 
 
 
@@ -274,9 +304,306 @@ LPPROCESS_INFORMATION lpProcessInformation //指向一个用来接收新进程�
 ResumeThread(pi.hThread) //唤醒线程
 ```
 
+#### API
 
+
+
+##### `获取进程PID`
+
+> GetCurrentProcessld
+
+```c++
+//HANDLE GetCurrentProcess();
+
+
+DWORD testTid = GetCurrentThreadId(); //线程id
+DWORD testPid = GetCurrentProcessId();
+
+cout << "当前tid：" << testTid << endl << "当前pid：" << testPid << endl;
+```
+
+
+
+##### `获取进程句柄`
+
+> GetCurrentProcess
+
+ 注意这个函数得到的是伪句柄，GetCurrentThread也是一样的，打印的话会一直是-1
+
+要转换需要另一个api
+
+##### `伪句柄转化为可以用来进程间通信的实句柄`
+
+> DuplicateHandle
+>
+> 它的本质是**跨进程拷贝内核对象** 功能非常强大，可以跨进程修改内存
+>
+> 
+>
+> DuplicateHandle获得一个进程句柄表中的一个记录项，然后在另一个进程的句柄表中创建这个记录项的一个副本。
+> DuplicateHandle 中dwOptions参数可以指定DUPLICATE_SAME_ACCESS和DUPLICATE_CLOSE_SOURCE标志。如果指定DUPLICATE_SAME_ACCESS标志将希望目标句柄拥有与源进程的句柄一样的访问掩码。如果指定DUPLICATE_CLOSE_SOURCE标志，会关闭源进程的句柄。使用这个标志，内核对象计数不会受到影响。
+> DuplicateHandle 函数与继承一样，目标进程并不知道它现在能访问一个新的内核对象，所以源进程以某种方式通知目标进程。与继承不一样的是，源进程不能使用命令行参数或更改目标进程的环境变量。
+> 可以利用DuplicateHandle修改内核对象的访问权限
+> 绝对不能使用CloseHandle函数关闭通过phTargetHandle参数返回的句柄。
+
+```c++
+BOOL DuplicateHandle(
+  HANDLE hSourceProcessHandle,//要拷贝的目标进程句柄
+  HANDLE hSourceHandle,//目标进程中要拷贝的句柄。不能调用与调用者相关的进程句柄，除非就是当前进程
+  HANDLE hTargetProcessHandle,//接收进程句柄,源句柄从属于当前进程，则使用GetCurrentProcess
+  LPHANDLE lpTargetHandle,//输出 指向接收句柄的变量的指针。TargetHandle句柄值并不属于源进程的句柄表中的，若错误关闭了，会产生不可预料的结果。除非就是当前进程
+  DWORD dwDesiredAccess,//新句柄要求的安全访问级别。
+  BOOL bInheritHandle,//得到的句柄能不能被得到的其的进程的子进程继承。
+  DWORD dwOptions//可选动作。此参数可以为零，也可以为以下值的任意组合。详见下面表格
+);
+```
+
+````c++
+DuplicateHandle(GetCurrentProcess(),
+		GetCurrentProcess(), 
+		GetCurrentProcess(),
+		&hexx,
+		0,
+		false, 
+		DUPLICATE_SAME_ACCESS);
+
+cout <<  (DWORD) hexx << endl;
+
+````
+
+| 值                                   | 含义                                                         |
+| :----------------------------------- | :----------------------------------------------------------- |
+| **DUPLICATE_CLOSE_SOURCE**0x00000001 | 关闭源句柄。无论返回任何错误状态，都会发生这种情况。         |
+| **DUPLICATE_SAME_ACCESS**0x00000002  | 忽略*dwDesiredAccess*参数。复制句柄与源句柄具有相同的访问权限。 |
+
+##### `获取命令行`
+
+> GetCommandLine
+
+
+
+##### `获取启动信息`
+
+> GetStartupInfo 
+
+`````c++
+void GetStartupInfoW(
+  LPSTARTUPINFOW lpStartupInfo
+);
+`````
+
+在创建进程的时候咱们已经设置过lpStartupInfo这个结构体
+
+我们现在在上面创建进程的基础上获取它
+
+```c++
+STARTUPINFO mif;
+GetStartupInfo(&mif);
+```
+
+
+
+##### `遍历进程ID`
+
+> EnumProcesses 检索系统中每个进程对象的进程标识符。
+
+```c++
+BOOL EnumProcesses(
+  DWORD   *lpidProcess,//指向接收进程标识符列表的数组的指针。
+  DWORD   cb,//pProcessIds数组的大小，以字节为单位。
+  LPDWORD lpcbNeeded//pProcessIds数组中返回的字节数。
+);
+```
+
+以下实例因为权限原因有些进程打不开，需要提权
+
+````c++
+
+#include <iostream>
+#include <tchar.h>
+#include <windows.h>
+#include "psapi.h"
+using namespace std;
+
+int main(int argc, char* argv[])
+{
+	
+
+	DWORD processList[2048];
+	ZeroMemory(processList, sizeof(processList));
+	DWORD conutProcessWord;
+	DWORD conutProcess;
+	HMODULE  handlist;
+
+	DWORD cbNeeded;
+	if (!EnumProcesses(processList,sizeof(processList),&conutProcessWord))
+	{
+		MessageBox(NULL,_T("未知错误") ,_T("错误"),NULL);
+	}
+	conutProcess = conutProcessWord / sizeof(DWORD);
+	
+	for (int i =0;i<conutProcess;i++)
+	{
+		HANDLE CurrentProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processList[i]);//有些进程可能打不开
+		TCHAR ProcessName[MAX_PATH] = {0};
+		if (CurrentProcess)
+		{
+			bool a = EnumProcessModules(CurrentProcess, &handlist, sizeof(handlist), &cbNeeded);
+			if (a)GetModuleBaseName(CurrentProcess, handlist, ProcessName, sizeof(ProcessName) / sizeof(TCHAR));
+			
+		}
+		printf("\n进程名:%ws   pid:%d\n", ProcessName, processList[i]);
+		//cout << "进程名" << (string)ProcessName << endl<<"pid"<<ProcessName<<endl;
+		
+		CloseHandle(CurrentProcess);
+	}
+
+	getchar();
+	
+	return 0;
+}
+
+
+````
+
+
+
+
+
+##### `快照`
+
+> CreateToolhelp32Snapshot
+
+```c++
+HANDLE WINAPI CreateToolhelp32Snapshot(
+  DWORD dwFlags,
+  DWORD th32ProcessID
+);
+```
+
+- *dwFlags*
+  [in]要包括在快照中的系统部分。下表显示了可能的值。
+
+  | 值                  | 描述                                                         |
+  | :------------------ | :----------------------------------------------------------- |
+  | TH32CS_GETALLMODS   | 包括快照中的所有模块。必须与OR运算符一起使用，并与TH32CS_SNAPMODULE结合使用。 |
+  | TH32CS_SNAPALL      | 等效于指定TH32CS_SNAPHEAPLIST，TH32CS_SNAPMODULE，TH32CS_SNAPPROCESS和TH32CS_SNAPTHREAD。 |
+  | TH32CS_SNAPHEAPLIST | 在快照中包括指定进程的堆列表。                               |
+  | TH32CS_SNAPMODULE   | 在快照中包括指定进程的模块列表。                             |
+  | TH32CS_SNAPNOHEAPS  | 默认情况下，创建过程快照时会包含进程堆信息。为了更有效地接收进程的基本信息，请将此标志与TH32CS_SNAPPROCESS一起使用。 |
+  | TH32CS_SNAPPROCESS  | 在快照中包括进程列表，此时 th32ProcessID 参数被忽略。        |
+  | TH32CS_SNAPTHREAD   | 在快照中包括线程列表，此时 th32ProcessID 参数被忽略。        |
+
+- *th32ProcessID*
+  [输入]进程标识符。此参数可以为零以指示当前进程。指定TH32CS_SNAPHEAPLIST或TH32CS_SNAPMODULE时使用此参数。否则，它将被忽略。
+
+> 执行失败会返回-1u也就是INVALID_HANDLE_VALUE
+
+从快照列表中获取进程信息需要使用 Process32First 和 Process32Next 函数遍历，首次调用使用Process32First 后续都将使用Process32Next 循环遍历如果执行成功返回true并将下一个条目放入缓冲区
+
+它们结构类似
+
+````c++
+BOOL WINAPI Process32Next(
+  HANDLE hSnapshot,
+  LPPROCESSENTRY32 lppe
+);
+````
+
+> - *hSnapshot*
+>   [in]处理上一次调用[CreateToolhelp32Snapshot](https://docs.microsoft.com/en-us/previous-versions/aa911386(v=msdn.10))函数所返回的快照。
+>
+> - *lppe*
+>   [out]指向[PROCESSENTRY32](https://docs.microsoft.com/en-us/previous-versions/aa911518(v=msdn.10))结构的指针。
+
+
+
+````c++
+int main(int argc, char* argv[])
+{
+
+	
+	PROCESSENTRY32 pe32;
+	//初始化
+	pe32.dwSize = sizeof(pe32);
+
+	//使用CreateToolhelp32Snapshot创建快照 TH32CS_SNAPPROCESS所有进程
+	HANDLE hProcessSnap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+	if (hProcessSnap== INVALID_HANDLE_VALUE)
+	{
+		printf("未知错误");
+		return 1;
+	}
+	//开始遍历
+	BOOL bInfo = ::Process32First(hProcessSnap, &pe32);
+	while (bInfo)
+	{
+		printf_s("进程名称:%ws    进程id:%u \n", pe32.szExeFile, pe32.th32ParentProcessID);
+		bInfo = ::Process32Next(hProcessSnap, &pe32);
+	}
+	//清理快照
+	CloseHandle(hProcessSnap);
+	return 0;
+}
+````
+
+
+
+
+
+``PROCESSENTRY32结构体`
+
+```c++
+typedef struct tagPROCESSENTRY32 { 
+  DWORD dwSize; 
+  DWORD cntUsage; 
+  DWORD th32ProcessID; 
+  DWORD th32DefaultHeapID; 
+  DWORD th32ModuleID; 
+  DWORD cntThreads; 
+  DWORD th32ParentProcessID; 
+  LONG  pcPriClassBase; 
+  DWORD dwFlags; 
+  TCHAR szExeFile[MAX_PATH]; 
+  DWORD th32MemoryBase;
+  DWORD th32AccessKey;
+  } PROCESSENTRY32; 
+  typedef PROCESSENTRY32* PPROCESSENTRY32; 
+
+```
+
+- **dwSize**
+  指定结构的长度（以字节为单位）。在调用[Process32First](https://docs.microsoft.com/en-us/previous-versions/windows/embedded/ms918420(v=msdn.10))函数之前，将此成员设置为**sizeof（PROCESSENTRY32）**。如果不初始化**dwSize**，则**Process32First**将失败。
+- **cntUsage**
+  对进程的引用数。必须为1。
+- **th32ProcessID**
+  进程的标识符。Win32 API元素可以使用此成员的内容。
+- **th32DefaultHeapID**
+  进程的默认堆的标识符。该成员的内容仅对工具帮助功能有意义。它不是句柄，也不可用于Win32 API元素。
+- **th32ModuleID**
+  进程的模块标识符。必须为0。
+- **cntThreads**
+  进程启动的执行线程数。
+- **th32ParentProcessID**
+  创建正在检查的进程的进程的标识符。必须为0。
+- **pcPriClassBase**
+  此进程创建的任何线程的基本优先级。值始终为THREAD_PRIORITY_NORMAL
+- **dwFlags**
+  保留；不使用。
+- **szExeFile*
+  Null结尾的字符串，其中包含该进程的可执行文件的路径和文件名。
+- **th32MemoryBase**
+  可执行文件的加载地址。
+- **th32AccessKey**
+  位数组。每一位表示允许查看一个进程的地址空间。对于**PROCESSENTRY32**结构，键包含查看该地址空间所需的位。
+
+以上成员的字符均Unicode编码
 
 ## 线程
+
+
+
 1. 线程是附属在进程上的执行实体，是代码的执行流程
 
    进程是一个空间的上的概念，线程是时间的概念，也就是你正在运行的代码
