@@ -468,6 +468,32 @@ int main(int argc, char* argv[])
 
 
 
+```c++
+//提权代码
+BOOL ImproveProcPriv()
+{
+	
+	HANDLE token;
+	//提升权限
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token))
+	{
+		MessageBox(NULL, _T("打开进程令牌失败..."),_T( "错误"), MB_ICONSTOP);
+		return FALSE;
+	}
+	TOKEN_PRIVILEGES tkp;
+	tkp.PrivilegeCount = 1;
+	::LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &tkp.Privileges[0].Luid);  //  获得 SE_DEBUG_NAME 特权
+	tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+	if (!AdjustTokenPrivileges(token, FALSE, &tkp, sizeof(tkp), NULL, NULL))
+	{
+		MessageBox(NULL, _T("调整令牌权限失败..."),_T( "错误"), MB_ICONSTOP);
+		return FALSE;
+	}
+	CloseHandle(token);
+	return TRUE;
+}
+```
+
 
 
 ##### `快照`
@@ -548,11 +574,47 @@ int main(int argc, char* argv[])
 }
 ````
 
+##### `用进程名获取pid`
+
+改造以下，用进程名获取pid
+
+```c++
+DWORD dwPIDGetByName(const TCHAR* exeName)
+{
+	PROCESSENTRY32 pe32;
+	//初始化
+	pe32.dwSize = sizeof(pe32);
+
+	//使用CreateToolhelp32Snapshot创建快照 TH32CS_SNAPPROCESS所有进程
+	HANDLE hProcessSnap = ::CreateToolhelp32Snapshot(TH32CS_SNAPALL, 0);
+
+	if (hProcessSnap == INVALID_HANDLE_VALUE)
+	{
+		printf("未知错误");
+		return -1;
+	}
+	//开始遍历
+	::Process32First(hProcessSnap, &pe32);
+	do
+	{
+
+		if (!_tcscmp(exeName, pe32.szExeFile))
+		{
+
+			CloseHandle(hProcessSnap);
+			return pe32.th32ProcessID;
+		}
+
+	} while (::Process32Next(hProcessSnap, &pe32));
+	//清理快照
+	CloseHandle(hProcessSnap);
+	return 0;
+}
+```
 
 
 
-
-``PROCESSENTRY32结构体`
+##### `PROCESSENTRY32结构体`
 
 ```c++
 typedef struct tagPROCESSENTRY32 { 
@@ -1505,7 +1567,7 @@ int main(int argc, char* argv[])
 
 windowsAPI对底层封装了，所以在调用的时候不用管相关内容的差别。
 
-### 卷:这是文件系统的顶层设计
+### 卷:文件系统的顶层设计
 
 > 一个硬盘被分区后产生的分区被叫做卷
 
@@ -1864,8 +1926,6 @@ int main(int argc, char* argv[])
 
 通过导入表可以查看使用的dll模块和具体那个函数。
 
-
-
 ### dllmain
 
 ```c++
@@ -1920,12 +1980,220 @@ BOOL APIENTRY DllMain( HMODULE hModule,
 
 ## 远程线程
 
+复盘下线程，一般来讲，一个进程可能本身包含了许多的线程，作为程序执行过程(其实process就有流程过程的意思)的单位，一般而言只有自己才能去创建线程。但是windows不知道为何会有这么一个api让你可以用，当然有就可以做很多事情了(滑稽)
+
+```c++
+HANDLE CreateRemoteThread(
+  HANDLE                 hProcess,
+  LPSECURITY_ATTRIBUTES  lpThreadAttributes,
+  SIZE_T                 dwStackSize,
+  LPTHREAD_START_ROUTINE lpStartAddress,
+  LPVOID                 lpParameter,
+  DWORD                  dwCreationFlags,
+  LPDWORD                lpThreadId
+);
+```
+
+他和CreateThread仅仅在一个参数上有差别，那就是需要传入一个目标进程句柄，而且调用的线程执行函数地址必须是一个在目标进程的虚拟地址。所以咱们如果需要在其他进程控制另一个进程的执行可以使用它，最重要的是使用这个api需要你对进程线程的api有相当的了解。
+
+接下来就是一个调用另一个进程的函数的实例
+
+```c++
+
+#include <iostream>
+#include <tchar.h>
+#include <windows.h>
+
+using namespace std;
+
+int CreateRemoteThreadStatu(DWORD dwPid, DWORD dwAddrProc)
+{
+	HANDLE hTarget = 0;
+	DWORD dwThreadID = 0;
+	HANDLE hThread;
+	hTarget = OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwPid);
+
+	if (!hTarget)
+	{
+		OutputDebugString(_T("err：OpenProcessFail"));
+		
+		return false;
+	}
+
+	hThread =  CreateRemoteThread(hTarget, NULL, 0, (LPTHREAD_START_ROUTINE)dwAddrProc, NULL, 0,&dwThreadID);
+	if (!hThread) 
+	{
+		OutputDebugString(_T("err：CreateRemoteThreadFail"));
+		
+		return false;
+	}
+	CloseHandle(hThread);
+	CloseHandle(hTarget);
+	return TRUE;
+}
+
+int main(int argc, char* argv[])
+{
+	//先想办法获取pid和目标进程的线程函数  00AC1800
+	CreateRemoteThreadStatu(1780, 0x00AC1800);
+	
+
+	getchar();
+	return 0;
+}
 
 
-## 远程线程注入
+```
+
+没什么好说的，不过还是有老生常谈的OpenProcess权限问题，请注意
+
+## 远程线程注入dll
+
+单纯的远程线程并不能做什么事其实，因为你调用的是目标进程的东西，那么能不能想方设法的让目标进程运行你写的代码呢？有，就是注入技术！
+
+其实也别看的太高大上，从最终的exe来看，一个进程的创建在win上，肯定会经过在进程部分所说进程创建的过程，正因如此，所谓的注入就是把你的模块和代码写入目标进程空间中，然后执行。
+
+首先win上每个进程都有那么几个模块是必须被加载的，Kernel32.dll、USER32.dll...，在近几代的windows中dll的基址每次重启都会改变，但是在像这些dll每次会被加载的各个进程同一个地址，这也就有了注入的可能。而且Kernel32中有一个非常有用的api那就是LoadLibrary(注意这事一个宏具体由A\W宽窄之分)，它可以使得咱们自己写的模块可以被放入目标进程中。但是啊，这个巧合很早就被人发现出现了，厂商对于各个层级的防护都是有的，有些厂商，尤其是T字开头更是基本上给每一个产品都上了内核保护，当然由于必须调用LoadLibrary，特征非常明显。
+
+```c++
+int CreateRemoteThreadStatu(DWORD dwPid, const TCHAR* szPathDll)
+{
+	
+	LPVOID lpAllocTaget ;//目标进程分配的首地址
+	HANDLE hTarget = 0;//目标进程
+	DWORD dwloadAddr;//要获取的函数地址
+	HANDLE hThread = 0;//创建的远程线程句柄
+	DWORD dwLengTh = 0;//dll字符串所需的大小空间
+	HMODULE hModel = 0;//模块对象，需要找到的模块
+	bool bCopy;
+	//计算dll名字长度
+	dwLengTh = (_tcslen(szPathDll) + 1) * sizeof(TCHAR);
+
+	//目标进程句柄
+	hTarget = OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwPid);
+
+	if (!hTarget)
+	{
+		OutputDebugString(_T("err：OpenProcessFail"));
+		CloseHandle(hTarget);
+		return false;
+	}
+
+	//分配内存
+	lpAllocTaget = VirtualAllocEx(hTarget, NULL, dwLengTh, MEM_COMMIT, PAGE_READWRITE);
+	
+	
+
+	if (!lpAllocTaget)
+	{
+		OutputDebugString(_T("err：VirtualAllocExFail"));
+		CloseHandle(hTarget);
+		return false;
+	}
+
+	// 拷贝dll路径加载到目标进程
+	bCopy = WriteProcessMemory(hTarget, lpAllocTaget, szPathDll, dwLengTh, NULL);
+	//获取模块
+	hModel = GetModuleHandle(_T("Kernel32"));
+	//获取LoadlibraryA函数地址
+	
+	dwloadAddr = (DWORD)GetProcAddress(hModel, "LoadLibraryW");
+
+	//创建远程线程
+	hThread = CreateRemoteThread(hTarget, NULL, 0, (LPTHREAD_START_ROUTINE)dwloadAddr, lpAllocTaget,  0, NULL);
+	if (!hThread)
+	{
+		OutputDebugString(_T("err：CreateRemoteThreadFail"));
+		CloseHandle(hTarget);
+		CloseHandle(hThread);
+		return false;
+	}
+	
+	CloseHandle(hTarget);
+	CloseHandle(hThread);
+	return TRUE;
+}
+
+
+
+int main(int argc, char* argv[])
+{
+	
+	
+	DWORD a = dwPIDGetByName(_T("REMOTEthread.exe"));
+	bool aa =	CreateRemoteThreadStatu(a, _T("C:\\Users\\kinji\\Desktop\\测试\\Dll_1st.dll"));
+
+	return 0;
+}
+```
+
+dwPIDGetByName函数前面有，就是用快照查exe返回pid
+
+### dll卸载
+
+注意异常处理，我这里没写
+
+```c++
+DWORD dwFindAndFreeLibrary(const DWORD& exePid,  const TCHAR* ModelName)
+{
+	HANDLE hModuleSnap;
+	HANDLE hTagetProc;
+	MODULEENTRY32  me32;
+	HMODULE hMod ;//获取内核模块
+	LPTHREAD_START_ROUTINE lpProcAddress;
+	//初始化
+	me32.dwSize = sizeof(me32);
+	hTagetProc = OpenProcess(PROCESS_ALL_ACCESS,false,exePid);
+	hMod = GetModuleHandle(_T("kernel32.dll"));
+	//重要！！！获取FreeLibrary地址
+	lpProcAddress = (LPTHREAD_START_ROUTINE)GetProcAddress(hMod, "FreeLibrary");
+	
+	hMod = nullptr;
+	CloseHandle(hMod);
+
+	//使用CreateToolhelp32Snapshot创建快照 某个进程的所有模块
+	hModuleSnap = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, exePid);
+
+	if (hModuleSnap == INVALID_HANDLE_VALUE)
+	{
+		printf("未知错误");
+		return -1;
+	}
+	//开始遍历
+	::Module32First(hModuleSnap, &me32);
+	do
+	{
+
+		if (!_tcscmp(ModelName, me32.szModule))
+		{
+
+			//记住一定是在目标进程去卸载dll
+			HANDLE hThread = CreateRemoteThread(hTagetProc, NULL, 0, lpProcAddress, me32.modBaseAddr, 0, NULL);
+
+			CloseHandle(hThread);
+			
+			CloseHandle(hTagetProc);
+			CloseHandle(hModuleSnap);
+			return 0;
+		}
+
+	} while (::Module32Next(hModuleSnap, &me32));
+	//清理快照
+	CloseHandle(hTagetProc);
+	CloseHandle(hModuleSnap);
+	return 1;
+}
+```
+
+
 
 ## 进程间的通信
 
-## 模块隐藏
+在vc里面有几个进程通信的机制：剪切板、匿名管道、命名管道、匿名管道和油槽，本质上都是共享或者使用一块公共内存。涉及网络当然还有套接字和流
+
+## 
 
 ## 注入代码
+
+
+
